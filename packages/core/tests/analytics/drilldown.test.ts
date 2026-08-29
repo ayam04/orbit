@@ -420,4 +420,76 @@ describe('listAnalyticsDrilldown', () => {
       ).rejects.toMatchObject({ code: 'validation_failed' });
     }
   });
+
+  it('invalidates a cursor minted under a wider team scope once membership narrows', async () => {
+    const operations = await createTeam(workspace.admin, { name: 'Operations', key: 'OPS' });
+    for (const title of ['Alpha', 'Beta']) {
+      await createIssue(workspace.admin, { teamId: workspace.teamId, title });
+    }
+    await createIssue(workspace.admin, { teamId: operations.team.id, title: 'Other team issue' });
+    const member = await addMember(workspace, 'member', {
+      teamIds: [workspace.teamId, operations.team.id],
+    });
+
+    const first = await listAnalyticsDrilldown(
+      member.principal,
+      { query: query(), cohort: { cohort: 'current' }, limit: 2 },
+      { now, timezone: 'UTC' },
+    );
+    expect(first.nextCursor).not.toBeNull();
+    expect(first.issues.map((entry) => entry.title)).toEqual(['Alpha', 'Beta']);
+
+    await db.delete(schema.teamMember).where(eq(schema.teamMember.userId, member.user.id));
+    await db.insert(schema.teamMember).values({
+      id: newId(),
+      teamId: workspace.teamId,
+      userId: member.user.id,
+    });
+
+    const narrowed = await resolvePrincipal(member.user.id, workspace.organizationId);
+
+    await expect(
+      listAnalyticsDrilldown(
+        narrowed,
+        {
+          query: query(),
+          cohort: { cohort: 'current' },
+          cursor: first.nextCursor as string,
+          limit: 2,
+        },
+        { now, timezone: 'UTC' },
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+
+  it('invalidates a cursor minted as admin once the principal is demoted to member', async () => {
+    await createIssue(workspace.admin, { teamId: workspace.teamId, title: 'Alpha' });
+    const member = await addMember(workspace, 'admin', { teamIds: [workspace.teamId] });
+
+    const first = await listAnalyticsDrilldown(
+      member.principal,
+      { query: query(), cohort: { cohort: 'current' }, limit: 1 },
+      { now, timezone: 'UTC' },
+    );
+    expect(first.nextCursor).not.toBeNull();
+
+    await db
+      .update(schema.member)
+      .set({ role: 'member' })
+      .where(eq(schema.member.userId, member.user.id));
+    const demoted = await resolvePrincipal(member.user.id, workspace.organizationId);
+
+    await expect(
+      listAnalyticsDrilldown(
+        demoted,
+        {
+          query: query(),
+          cohort: { cohort: 'current' },
+          cursor: first.nextCursor as string,
+          limit: 1,
+        },
+        { now, timezone: 'UTC' },
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
 });
